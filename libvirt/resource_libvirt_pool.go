@@ -45,6 +45,24 @@ func resourceLibvirtPool() *schema.Resource {
 				Optional: true,
 				ForceNew: true,
 			},
+			"iscsi_server": {
+				Type:     schema.TypeString,
+				Computed: false,
+				Optional: true,
+				ForceNew: true,
+			},
+			"chapusername": {
+				Type:     schema.TypeString,
+				Computed: false,
+				Optional: true,
+				ForceNew: true,
+			},
+			"iscsi_iqn": {
+				Type:     schema.TypeString,
+				Computed: false,
+				Optional: true,
+				ForceNew: true,
+			},
 			"xml": {
 				Type:     schema.TypeList,
 				Optional: true,
@@ -80,11 +98,6 @@ func resourceLibvirtPoolCreate(d *schema.ResourceData, meta interface{}) error {
 		return fmt.Errorf(LibVirtConIsNil)
 	}
 
-	poolType := d.Get("type").(string)
-	if poolType != "dir" {
-		return fmt.Errorf("Only storage pools of type \"dir\" are supported")
-	}
-
 	poolName := d.Get("name").(string)
 
 	client.poolMutexKV.Lock(poolName)
@@ -97,18 +110,76 @@ func resourceLibvirtPoolCreate(d *schema.ResourceData, meta interface{}) error {
 	}
 	log.Printf("[DEBUG] Pool with name '%s' does not exist yet", poolName)
 
-	poolPath := d.Get("path").(string)
-	if poolPath == "" {
-		return fmt.Errorf("\"path\" attribute is requires for storage pools of type \"dir\"")
+	poolDef := libvirtxml.StoragePool{}
+	poolType := d.Get("type").(string)
+
+	if poolType == "dir" {
+		poolPath := d.Get("path").(string)
+		if poolPath == "" {
+			return fmt.Errorf("\"path\" attribute is required for storage pools of type \"dir\"")
+		}
+		poolDef.Name = poolName
+		poolDef.Type = poolType
+		poolDef.Target = &libvirtxml.StoragePoolTarget{
+			Path: poolPath,
+		}
+		poolDef.Source = &libvirtxml.StoragePoolSource{
+
+		}
+	// TODO: All iscsi-direct pool type
+	} else if poolType == "iscsi" {
+		if _, err := client.libvirt.LookupSecretByUsage(libvirt.SECRET_USAGE_TYPE_ISCSI, poolName);
+		err != nil {
+			return fmt.Errorf("A secret could not be found on the provider that matched the libvirt_poolname of \"%s\". Please create a secret for the CHAP password with a name that matches your pool name.", poolName)
+		}
+
+		poolPath := "/dev/disk/by-path"
+		poolChapUserName := d.Get("chapusername").(string)
+		poolTargetIQN := d.Get("iscsi_iqn").(string)
+		pooliSCSIServer := d.Get("iscsi_server").(string)
+
+		if poolChapUserName == "" {
+			return fmt.Errorf("\"chapusername\" attribute is required for storage pools of type \"iscsi\"")
+		}
+
+		if poolTargetIQN == "" {
+			return fmt.Errorf("\"iscsi_iqn\" attribute is required for storage pools of type \"iscsi\"")
+		}
+
+		if pooliSCSIServer == "" {
+			return fmt.Errorf("\"iscsi_server\" attribute is required for storage pools of type \"iscsi\"")
+		}
+
+		poolDef.Name = poolName
+		poolDef.Type = poolType
+		poolDef.Target = &libvirtxml.StoragePoolTarget{
+			Path: poolPath,
+		}
+		poolDef.Source = &libvirtxml.StoragePoolSource{
+			Host:      []libvirtxml.StoragePoolSourceHost{
+				{
+					Name: d.Get("iscsi_server").(string),
+					// TODO: Add port number as variable
+					Port: "3260",
+				},
+			},
+			Device:    []libvirtxml.StoragePoolSourceDevice{
+				{
+					Path: poolTargetIQN,
+				},
+			},
+			// TODO: Add mutual CHAP Authentication
+			Auth: &libvirtxml.StoragePoolSourceAuth{
+				Type: "chap",
+				Username: poolChapUserName,
+				Secret: &libvirtxml.StoragePoolSourceAuthSecret{
+					Usage: poolName,
+				},
+			},
+
+		}
 	}
 
-	poolDef := libvirtxml.StoragePool{
-		Type: "dir",
-		Name: poolName,
-		Target: &libvirtxml.StoragePoolTarget{
-			Path: poolPath,
-		},
-	}
 	data, err := xmlMarshallIndented(poolDef)
 	if err != nil {
 		return fmt.Errorf("Error serializing libvirt storage pool: %s", err)

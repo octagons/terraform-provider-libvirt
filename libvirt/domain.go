@@ -466,158 +466,180 @@ func setConsoles(d *schema.ResourceData, domainDef *libvirtxml.Domain) {
 }
 
 func setDisks(d *schema.ResourceData, domainDef *libvirtxml.Domain, virConn *libvirt.Connect) error {
-	var scsiDisk = false
-	var numOfISOs = 0
 
 	for i := 0; i < d.Get("disk.#").(int); i++ {
-		disk := newDefDisk(i)
-
+		log.Print("[DEBUG] Creating disks for volumes from an iSCSI storage pool")
 		prefix := fmt.Sprintf("disk.%d", i)
-		if d.Get(prefix + ".scsi").(bool) {
-			disk.Target.Bus = "scsi"
-			scsiDisk = true
-			if wwn, ok := d.GetOk(prefix + ".wwn"); ok {
-				disk.WWN = wwn.(string)
+		if iscsiDiskPoolName, ok := d.GetOk(prefix + ".iscsi_poolname"); ok {
+			if iscsiStorPool, err := virConn.LookupStoragePoolByName(iscsiDiskPoolName.(string)); err != nil {
+				return fmt.Errorf("cannot retrieve storage pool %s: %v", iscsiDiskPoolName.(string), err)
 			} else {
-				disk.WWN = randomWWN(10)
-			}
-		}
-
-		if volumeKey, ok := d.GetOk(prefix + ".volume_id"); ok {
-			diskVolume, err := virConn.LookupStorageVolByKey(volumeKey.(string))
-			if err != nil {
-				return fmt.Errorf("Can't retrieve volume %s: %v", volumeKey.(string), err)
-			}
-
-			diskVolumeName, err := diskVolume.GetName()
-			if err != nil {
-				return fmt.Errorf("Can't retrieve name for volume %s", volumeKey.(string))
-			}
-
-			diskPool, err := diskVolume.LookupPoolByVolume()
-			if err != nil {
-				return fmt.Errorf("Can't retrieve pool for volume %s", volumeKey.(string))
-			}
-
-			diskPoolName, err := diskPool.GetName()
-			if err != nil {
-				return fmt.Errorf("Can't retrieve name for pool of volume %s", volumeKey.(string))
-			}
-
-			// find out the format of the volume in order to set the appropriate
-			// driver
-			volumeDef, err := newDefVolumeFromLibvirt(diskVolume)
-			if err != nil {
-				return err
-			}
-			if volumeDef.Target != nil && volumeDef.Target.Format != nil && volumeDef.Target.Format.Type != "" {
-				if volumeDef.Target.Format.Type == "qcow2" {
-					log.Print("[DEBUG] Setting disk driver to 'qcow2' to match disk volume format")
-					disk.Driver = &libvirtxml.DomainDiskDriver{
-						Name: "qemu",
-						Type: "qcow2",
+				// TODO: Handle multiple volumes on the same iSCSI storage pool. Will probably
+				//  need to add a parameter of "iscsi_volname" or similar, or move this into its own loop
+				//  so that we can append each volume as a disk to the domain.
+				iscsiStorVols, _ := iscsiStorPool.ListAllStorageVolumes(0)
+				for _, iscsiVol := range iscsiStorVols {
+					// TODO: Handle this error
+					iscsiVolName, _ := iscsiVol.GetName()
+					log.Printf("[DEBUG] Checking for volumes on iSCSI storage pool: %s", iscsiVolName)
+					if iscsiDiskPath, _ := iscsiVol.GetPath(); iscsiDiskPath != "" {
+						disk := newDefiSCSIDisk(i, iscsiDiskPath)
+						domainDef.Devices.Disks = append(domainDef.Devices.Disks, disk)
+						}
+					if err := iscsiVol.Free(); err != nil {
+						return fmt.Errorf("can't free iSCSI volume: %v", err)
 					}
 				}
-				if volumeDef.Target.Format.Type == "raw" {
-					log.Print("[DEBUG] Setting disk driver to 'raw' to match disk volume format")
-					disk.Driver = &libvirtxml.DomainDiskDriver{
-						Name: "qemu",
-						Type: "raw",
+				if err := iscsiStorPool.Free(); err != nil {
+					return fmt.Errorf("can't free iSCSI volume: %v", err)
+				}
+			}
+		} else {
+			disk := newDefDisk(i)
+			var scsiDisk = false
+			var numOfISOs = 0
+				if d.Get(prefix + ".scsi").(bool) {
+					disk.Target.Bus = "scsi"
+					scsiDisk = true
+					if wwn, ok := d.GetOk(prefix + ".wwn"); ok {
+						disk.WWN = wwn.(string)
+					} else {
+						disk.WWN = randomWWN(10)
 					}
 				}
-			} else {
-				log.Printf("[WARN] Disk volume has no format specified: %s", volumeKey.(string))
-			}
 
-			disk.Source = &libvirtxml.DomainDiskSource{
-				Volume: &libvirtxml.DomainDiskSourceVolume{
-					Pool:   diskPoolName,
-					Volume: diskVolumeName,
-				},
-			}
-		} else if rawURL, ok := d.GetOk(prefix + ".url"); ok {
-			// Support for remote, read-only http disks
-			// useful for booting CDs
-			url, err := url.Parse(rawURL.(string))
-			if err != nil {
-				return err
-			}
+				if volumeKey, ok := d.GetOk(prefix + ".volume_id"); ok {
+					diskVolume, err := virConn.LookupStorageVolByKey(volumeKey.(string))
+					if err != nil {
+						return fmt.Errorf("Can't retrieve volume %s: %v", volumeKey.(string), err)
+					}
 
-			disk.Source = &libvirtxml.DomainDiskSource{
-				Network: &libvirtxml.DomainDiskSourceNetwork{
-					Protocol: url.Scheme,
-					Name:     url.Path,
-					Hosts: []libvirtxml.DomainDiskSourceHost{
-						{
-							Name: url.Hostname(),
-							Port: url.Port(),
+					diskVolumeName, err := diskVolume.GetName()
+					if err != nil {
+						return fmt.Errorf("Can't retrieve name for volume %s", volumeKey.(string))
+					}
+
+					diskPool, err := diskVolume.LookupPoolByVolume()
+					if err != nil {
+						return fmt.Errorf("Can't retrieve pool for volume %s", volumeKey.(string))
+					}
+
+					diskPoolName, err := diskPool.GetName()
+					if err != nil {
+						return fmt.Errorf("Can't retrieve name for pool of volume %s", volumeKey.(string))
+					}
+
+					// find out the format of the volume in order to set the appropriate
+					// driver
+					volumeDef, err := newDefVolumeFromLibvirt(diskVolume)
+					if err != nil {
+						return err
+					}
+					if volumeDef.Target != nil && volumeDef.Target.Format != nil && volumeDef.Target.Format.Type != "" {
+						if volumeDef.Target.Format.Type == "qcow2" {
+							log.Print("[DEBUG] Setting disk driver to 'qcow2' to match disk volume format")
+							disk.Driver = &libvirtxml.DomainDiskDriver{
+								Name: "qemu",
+								Type: "qcow2",
+							}
+						}
+						if volumeDef.Target.Format.Type == "raw" {
+							log.Print("[DEBUG] Setting disk driver to 'raw' to match disk volume format")
+							disk.Driver = &libvirtxml.DomainDiskDriver{
+								Name: "qemu",
+								Type: "raw",
+							}
+						}
+					} else {
+						log.Printf("[WARN] Disk volume has no format specified: %s", volumeKey.(string))
+					}
+
+					disk.Source = &libvirtxml.DomainDiskSource{
+						Volume: &libvirtxml.DomainDiskSourceVolume{
+							Pool:   diskPoolName,
+							Volume: diskVolumeName,
 						},
-					},
-				},
-			}
+					}
+				} else if rawURL, ok := d.GetOk(prefix + ".url"); ok {
+					// Support for remote, read-only http disks
+					// useful for booting CDs
+					url, err := url.Parse(rawURL.(string))
+					if err != nil {
+						return err
+					}
 
-			if strings.HasSuffix(url.Path, ".iso") {
-				disk.Device = "cdrom"
-				disk.Target = &libvirtxml.DomainDiskTarget{
-					Dev: fmt.Sprintf("hd%s", diskLetterForIndex(numOfISOs)),
-					Bus: "ide",
+					disk.Source = &libvirtxml.DomainDiskSource{
+						Network: &libvirtxml.DomainDiskSourceNetwork{
+							Protocol: url.Scheme,
+							Name:     url.Path,
+							Hosts: []libvirtxml.DomainDiskSourceHost{
+								{
+									Name: url.Hostname(),
+									Port: url.Port(),
+								},
+							},
+						},
+					}
+
+					if strings.HasSuffix(url.Path, ".iso") {
+						disk.Device = "cdrom"
+						disk.Target = &libvirtxml.DomainDiskTarget{
+							Dev: fmt.Sprintf("hd%s", diskLetterForIndex(numOfISOs)),
+							Bus: "ide",
+						}
+						disk.Driver = &libvirtxml.DomainDiskDriver{
+							Name: "qemu",
+						}
+						numOfISOs++
+					}
+
+					if !strings.HasSuffix(url.Path, ".qcow2") {
+						disk.Driver.Type = "raw"
+					}
+				} else if file, ok := d.GetOk(prefix + ".file"); ok {
+					// support for local disks, e.g. CDs
+					disk.Source = &libvirtxml.DomainDiskSource{
+						File: &libvirtxml.DomainDiskSourceFile{
+							File: file.(string),
+						},
+					}
+
+					if strings.HasSuffix(file.(string), ".iso") {
+						disk.Device = "cdrom"
+						disk.Target = &libvirtxml.DomainDiskTarget{
+							Dev: fmt.Sprintf("hd%s", diskLetterForIndex(numOfISOs)),
+							Bus: "ide",
+						}
+						disk.Driver = &libvirtxml.DomainDiskDriver{
+							Name: "qemu",
+							Type: "raw",
+						}
+
+						numOfISOs++
+					}
+
+					if !strings.HasSuffix(file.(string), ".qcow2") {
+						disk.Driver.Type = "raw"
+					}
+				} else if blockDev, ok := d.GetOk(prefix + ".block_device"); ok {
+					disk.Source = &libvirtxml.DomainDiskSource{
+						Block: &libvirtxml.DomainDiskSourceBlock{
+							Dev: blockDev.(string),
+						},
+					}
+					disk.Driver.Type = "raw"
 				}
-				disk.Driver = &libvirtxml.DomainDiskDriver{
-					Name: "qemu",
-				}
-				numOfISOs++
+			if scsiDisk {
+				domainDef.Devices.Controllers = append(domainDef.Devices.Controllers,
+					libvirtxml.DomainController{
+						Type:  "scsi",
+						Model: "virtio-scsi",
+					})
+				log.Printf("[DEBUG] scsiDisk: %t", scsiDisk)
 			}
-
-			if !strings.HasSuffix(url.Path, ".qcow2") {
-				disk.Driver.Type = "raw"
-			}
-		} else if file, ok := d.GetOk(prefix + ".file"); ok {
-			// support for local disks, e.g. CDs
-			disk.Source = &libvirtxml.DomainDiskSource{
-				File: &libvirtxml.DomainDiskSourceFile{
-					File: file.(string),
-				},
-			}
-
-			if strings.HasSuffix(file.(string), ".iso") {
-				disk.Device = "cdrom"
-				disk.Target = &libvirtxml.DomainDiskTarget{
-					Dev: fmt.Sprintf("hd%s", diskLetterForIndex(numOfISOs)),
-					Bus: "ide",
-				}
-				disk.Driver = &libvirtxml.DomainDiskDriver{
-					Name: "qemu",
-					Type: "raw",
-				}
-
-				numOfISOs++
-			}
-
-			if !strings.HasSuffix(file.(string), ".qcow2") {
-				disk.Driver.Type = "raw"
-			}
-		} else if blockDev, ok := d.GetOk(prefix + ".block_device"); ok {
-			disk.Source = &libvirtxml.DomainDiskSource{
-				Block: &libvirtxml.DomainDiskSourceBlock{
-					Dev: blockDev.(string),
-				},
-			}
-
-			disk.Driver.Type = "raw"
-		}
-
 		domainDef.Devices.Disks = append(domainDef.Devices.Disks, disk)
+		}
 	}
-
-	log.Printf("[DEBUG] scsiDisk: %t", scsiDisk)
-	if scsiDisk {
-		domainDef.Devices.Controllers = append(domainDef.Devices.Controllers,
-			libvirtxml.DomainController{
-				Type:  "scsi",
-				Model: "virtio-scsi",
-			})
-	}
-
 	return nil
 }
 

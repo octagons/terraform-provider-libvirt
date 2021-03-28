@@ -174,6 +174,10 @@ func resourceLibvirtDomain() *schema.Resource {
 							Type:     schema.TypeString,
 							Optional: true,
 						},
+						"iscsi_poolname": {
+							Type:     schema.TypeString,
+							Optional: true,
+					},
 					},
 				},
 			},

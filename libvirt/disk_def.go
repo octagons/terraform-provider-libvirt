@@ -24,6 +24,27 @@ func newDefDisk(i int) libvirtxml.DomainDisk {
 	}
 }
 
+func newDefiSCSIDisk(i int, iscsiDiskPath string) libvirtxml.DomainDisk {
+	return libvirtxml.DomainDisk{
+		Device: "disk",
+		Target: &libvirtxml.DomainDiskTarget{
+			Bus: "ide",
+			Dev: fmt.Sprintf("hd%s", diskLetterForIndex(i)),
+		},
+		Driver: &libvirtxml.DomainDiskDriver{
+			Name:  "qemu",
+			Type:  "raw",
+			Cache: "none",
+			IO:    "native",
+		},
+		Source: &libvirtxml.DomainDiskSource{
+			Block: &libvirtxml.DomainDiskSourceBlock{
+				Dev: iscsiDiskPath,
+			},
+		},
+	}
+}
+
 func randomWWN(strlen int) string {
 	const chars = "abcdef0123456789"
 	result := make([]byte, strlen)

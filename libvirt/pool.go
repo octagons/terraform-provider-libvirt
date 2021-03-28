@@ -3,6 +3,7 @@ package libvirt
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
@@ -101,9 +102,17 @@ func deletePool(client *Client, uuid string) error {
 		}
 	}
 
-	err = pool.Delete(0)
-	if err != nil {
-		return fmt.Errorf("error deleting storage pool: %s", err)
+	// iSCSI pool types do not support Delete operations, so we only do it if
+	//  the regex match fails. The reason a regex match on the DumpXML
+	//  output is used here is because there doesn't appear to be a way to
+	//  retrieve the type from the libvirt.StoragePool object.
+	re := regexp.MustCompile("<pool type='iscsi'>")
+	poolXML, _ := pool.GetXMLDesc(0)
+	if !re.MatchString(poolXML) {
+		err = pool.Delete(0)
+		if err != nil {
+			return fmt.Errorf("error deleting storage pool: %s", err)
+		}
 	}
 
 	err = pool.Undefine()
